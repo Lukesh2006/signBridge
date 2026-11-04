@@ -6,6 +6,7 @@ import '../../history/screens/history_screen.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../saved/screens/saved_screen.dart';
 import '../../settings/screens/settings_screen.dart';
+import 'slp_screen.dart';
 import '../widgets/app_guide_modal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -28,7 +29,7 @@ class _SignBridgeHomeState extends State<SignBridgeHome>
   final List<Widget> _screens = const [
     _HomeTab(),
     TranslateScreen(),   
-    _SLPPlaceholder(),  
+    SlpScreen(),  
     HistoryScreen(),
   ];
 
@@ -974,29 +975,3 @@ class _SectionLabel extends StatelessWidget {
 }
 
 
-class _SLPPlaceholder extends StatelessWidget {
-  const _SLPPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.keyboard_rounded, size: 48, color: Color(0xFF4B6CF7)),
-            SizedBox(height: 16),
-            Text('SLP Screen',
-                style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF1E2158))),
-            SizedBox(height: 8),
-            Text('Text → Sign Language Pose',
-                style: TextStyle(color: Colors.black45)),
-          ],
-        ),
-      ),
-    );
-  }
-}

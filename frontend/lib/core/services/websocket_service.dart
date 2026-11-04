@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
@@ -69,12 +70,22 @@ class WebSocketService {
 
       // Firebase ID token stays in the Authorization header. Never put
       // it in the query string (it would end up in server/proxy logs).
-      _channel = IOWebSocketChannel.connect(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $token',
-        },
-      );
+      if (kIsWeb) {
+        // Browser WebSocket APIs cannot set arbitrary request headers.
+        // Send the short-lived Firebase ID token as a requested subprotocol;
+        // the backend validates it before accepting the socket.
+        _channel = WebSocketChannel.connect(
+          uri,
+          protocols: ['signbridge.auth', token],
+        );
+      } else {
+        _channel = IOWebSocketChannel.connect(
+          uri,
+          headers: {
+            'Authorization': 'Bearer $token',
+          },
+        );
+      }
 
       await _channel!.ready;
 
