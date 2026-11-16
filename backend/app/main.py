@@ -58,6 +58,7 @@ from app.websocket.websocket_handler import handle_websocket
 from app.models.model import ISLModelAPI
 from app.models import personal_sign_model
 from app.config.firebase_admin_init import admin_auth
+from firebase_admin import db as firebase_db
 
 
 logging.basicConfig(
@@ -384,14 +385,17 @@ async def deep_health(request: Request):
     model_ok = False
 
     try:
-        admin_auth.collection("users").limit(1).get()
+        # Realtime Database: a shallow read of the root only lists keys.
+        await run_in_threadpool(lambda: firebase_db.reference("/").get(shallow=True))
         database_ok = True
     except Exception:
         logger.exception("Database health check failed")
 
     try:
-        model_result = model_api.check_health()
-        model_ok = True
+        # check_health() returns False (it does not raise) when the model
+        # server is unreachable, so the result itself decides.
+        model_result = await run_in_threadpool(model_api.check_health)
+        model_ok = bool(model_result)
     except Exception:
         logger.exception("Model server health check failed")
         model_result = None
@@ -399,7 +403,7 @@ async def deep_health(request: Request):
     result = {
         "status": "ok" if database_ok and model_ok else "degraded",
         "database": "ok" if database_ok else "error",
-        "model_server": model_result if model_ok else "error",
+        "model_server": "ok" if model_ok else "error",
     }
 
     if not database_ok or not model_ok:

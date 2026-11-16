@@ -29,7 +29,9 @@ from app.websocket.websocket_processing import (
 logger = logging.getLogger(__name__)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-USB_ROOT = BACKEND_ROOT.parent
+# Recordings and trained models live next to the repo by default (the BUG 2
+# USB drive). A server sets SIGNBRIDGE_DATA_DIR to a folder on its own disk.
+USB_ROOT = Path(os.environ.get("SIGNBRIDGE_DATA_DIR") or BACKEND_ROOT.parent)
 SAMPLE_ROOT = USB_ROOT / "training_samples"
 MODEL_ROOT = USB_ROOT / "personal_models"
 SEED_ROOT = SAMPLE_ROOT / "seed"
