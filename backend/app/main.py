@@ -56,6 +56,7 @@ from app.services.authentication import (
 from app.services.history import retrieve_history, store_translation, delete_translation, delete_all_translations
 from app.websocket.websocket_handler import handle_websocket
 from app.models.model import ISLModelAPI
+from app.models import personal_sign_model
 from app.config.firebase_admin_init import admin_auth
 
 
@@ -130,12 +131,15 @@ async def lifespan(app: FastAPI):
         target=model_api.check_health, 
         daemon=True
         ).start()
+    # Build the personal-sign MediaPipe detectors now, not on the first clip.
+    personal_sign_model.warm_up_extractors()
     yield
     executor.shutdown(wait=False)
     # Stop accepting new work in the shared SLT pools and let
     # in-flight jobs finish without blocking shutdown.
     slt_landmark_executor.shutdown(wait=False)
     slt_inference_executor.shutdown(wait=False)
+    personal_sign_model.shutdown_extractors()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -243,13 +247,17 @@ async def require_ws_auth(
     authorization: str = Header(default=""),
 ) -> str:
 
-    if not authorization.startswith("Bearer "):
-        raise WebSocketException(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Missing or invalid token",
-        )
-
-    token = authorization.split(" ", 1)[1].strip()
+    token = ""
+    if authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    else:
+        # Browser WebSocket APIs don't allow an Authorization header.
+        # Accept the Firebase ID token as a second requested subprotocol;
+        # it is validated exactly like the native-client bearer token.
+        protocols = websocket.scope.get("subprotocols", [])
+        if len(protocols) >= 2 and protocols[0] == "signbridge.auth":
+            token = protocols[1].strip()
+            websocket.scope["signbridge_auth_subprotocol"] = True
 
     if not token:
         raise WebSocketException(
@@ -755,6 +763,93 @@ async def websocket_translate(
 
 # SLP Model routes
 
+@app.get("/me/signs/samples")
+@limiter.limit("30/minute", error_message="Too many sign-sample requests.")
+async def list_personal_sign_samples(
+    request: Request,
+    user_id: str = Depends(require_auth),
+):
+    """List only the authenticated user's local personalized training clips."""
+    return {
+        "samples": await run_in_threadpool(personal_sign_model.list_samples, user_id),
+        "details": await run_in_threadpool(personal_sign_model.list_sample_details, user_id),
+    }
+
+
+# 40/hour leaves room for re-uploading a clip the user confirms after a gate warning.
+@app.post("/me/signs/samples")
+@limiter.limit("40/hour", error_message="Too many sign clips uploaded.")
+async def upload_personal_sign_sample(
+    request: Request,
+    label: str,
+    kind: str | None = None,
+    confirm: bool = False,
+    user_id: str = Depends(require_auth),
+):
+    """Gate a new clip; it is saved only when reliable or confirmed by the user."""
+    clip = await request.body()
+    try:
+        result = await run_in_threadpool(
+            personal_sign_model.save_sample, user_id, label, clip, kind, confirm
+        )
+    except ValueError as exc:
+        raise StarletteHTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise StarletteHTTPException(status_code=503, detail=str(exc)) from exc
+    return result
+
+
+@app.delete("/me/signs/samples/{label}/{sample_id}")
+@limiter.limit("30/minute", error_message="Too many sign-sample requests.")
+async def delete_personal_sign_sample(
+    request: Request,
+    label: str,
+    sample_id: str,
+    user_id: str = Depends(require_auth),
+):
+    """Undo one saved example and keep the user's trained model in sync."""
+    try:
+        return await run_in_threadpool(
+            personal_sign_model.delete_sample, user_id, label, sample_id
+        )
+    except LookupError as exc:
+        raise StarletteHTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise StarletteHTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise StarletteHTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/me/signs/train")
+@limiter.limit("5/hour", error_message="Training is temporarily rate limited.")
+async def train_personal_sign_model(
+    request: Request,
+    user_id: str = Depends(require_auth),
+):
+    try:
+        if personal_sign_model.list_samples(user_id):
+            return await run_in_threadpool(personal_sign_model.train_user, user_id)
+        return await run_in_threadpool(personal_sign_model.train_seed_model)
+    except ValueError as exc:
+        raise StarletteHTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise StarletteHTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/me/signs/predict")
+@limiter.limit("60/minute", error_message="Too many recognition requests.")
+async def predict_personal_sign(
+    request: Request,
+    user_id: str = Depends(require_auth),
+):
+    clip = await request.body()
+    try:
+        return await run_in_threadpool(personal_sign_model.predict_user, user_id, clip)
+    except ValueError as exc:
+        raise StarletteHTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise StarletteHTTPException(status_code=503, detail=str(exc)) from exc
+
 @app.get("/slp/v1/health")
 @limiter.limit(
     "10/minute",
@@ -794,8 +889,8 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     print(f"\n{'='*60}")
-    print(f"  SignBridge Backend  ->  http://0.0.0.0:{port}/")
-    print(f"  SLT WebSocket       ->  ws://0.0.0.0:{port}/slt/v1/ws")
+    print(f"  SignBridge Backend  ->  http://127.0.0.1:{port}/")
+    print(f"  SLT WebSocket       ->  ws://127.0.0.1:{port}/slt/v1/ws")
     print(f"  Android emulator    ->  use 10.0.2.2 instead of localhost")
     print(f"{'='*60}\n")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="127.0.0.1", port=port)

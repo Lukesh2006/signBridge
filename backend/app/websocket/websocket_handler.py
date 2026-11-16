@@ -770,7 +770,13 @@ async def handle_websocket(
 
     loop = asyncio.get_running_loop()
 
-    await ws.accept()
+    await ws.accept(
+        subprotocol=(
+            "signbridge.auth"
+            if ws.scope.get("signbridge_auth_subprotocol")
+            else None
+        ),
+    )
 
     logger.info(
         "WebSocket client connected user_id=%s",

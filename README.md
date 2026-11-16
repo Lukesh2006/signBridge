@@ -2,8 +2,8 @@
 
 A real-time **Indian Sign Language (ISL) recognition and translation system** built around a Flutter client, FastAPI backend, WebSocket-based streaming, MediaPipe landmark processing, and a fine-tuned Swin3D-S recognition model.
 
-![GitHub Repo stars](https://img.shields.io/github/stars/Uni-Creator/signBridge?style=social)
-![GitHub forks](https://img.shields.io/github/forks/Uni-Creator/signBridge?style=social)
+![GitHub Repo stars](https://img.shields.io/github/stars/Lukesh2006/signBridge?style=social)
+![GitHub forks](https://img.shields.io/github/forks/Lukesh2006/signBridge?style=social)
 ![Accuracy](https://img.shields.io/badge/Top--1%20Accuracy-66.84%25-blue)
 ![Classes](https://img.shields.io/badge/ISL%20Classes-76-green)
 ![Backbone](https://img.shields.io/badge/Backbone-Swin3D--S-orange)
@@ -807,7 +807,7 @@ Install:
 Clone the repository:
 
 ```bash
-git clone https://github.com/Uni-Creator/signBridge.git
+git clone https://github.com/Lukesh2006/signBridge.git
 cd signBridge
 ```
 
@@ -1224,28 +1224,20 @@ See [`LICENSE`](LICENSE) for details.
 
 ---
 
-# Contributors
-
-<a href="https://github.com/Uni-Creator/signBridge/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=Uni-Creator/signBridge" />
-</a>
-
----
-
 # Contact
 
 For questions or inquiries:
 
-**Abhay Singh**
+**Lukesh2006**
 
-Email: `abhayr24564@gmail.com`
+GitHub: https://github.com/Lukesh2006
 
 ---
 
 ## Repository
 
 **GitHub:**
-https://github.com/Uni-Creator/signBridge
+https://github.com/Lukesh2006/signBridge
 
 **Model:**
 https://huggingface.co/Creator-090/isl-swin3d-model

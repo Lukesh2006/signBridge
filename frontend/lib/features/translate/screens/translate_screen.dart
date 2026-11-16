@@ -1,15 +1,19 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:http/http.dart' as http;
 import '../../../core/services/camera_frame_converter.dart';
 
 import '../../auth/providers/auth_provider.dart';
 import '../providers/translation_provider.dart';
 import '../../../core/services/websocket_service.dart';
+import 'personal_signs_screen.dart';
 
 class TranslateScreen extends StatefulWidget {
   const TranslateScreen({super.key, this.webSocketService});
@@ -31,10 +35,19 @@ class _TranslateScreenState extends State<TranslateScreen>
 
   bool _cameraInitialized = false;
   bool _isStreaming = false;
+  bool _webRecognitionRunning = false;
   bool _isSpeaking = false;
+  bool _apiServerReachable = false;
+  Timer? _apiHealthTimer;
+  String _recognitionStage = 'Waiting for camera';
+  String _signalSummary = 'No clip analyzed yet';
+  String _modelReadout = 'Waiting for a sign';
   String _statusMessage = 'Camera not started';
   double _confidence = 0;
+  // Personal-sign matches show a match badge instead of a percentage.
+  bool _personalMatch = false;
   Future<void> _cameraTask = Future<void>.value();
+  Future<void>? _webRecognitionTask;
   int _cameraOperations = 0;
   bool _cameraActive = true;
   final Stopwatch _frameClock = Stopwatch()..start();
@@ -45,6 +58,8 @@ class _TranslateScreenState extends State<TranslateScreen>
   // Frame Throttling
   int? _lastFrameTime;
   static const int _frameIntervalMs = 80; // ~12 FPS
+  final List<String> _continuousWords = [];
+  String _lastContinuousLabel = '';
 
   // static const primaryColor = Color(0xFF2B2D5D);
   // static const accentColor = Color(0xFF4B6CF7);
@@ -57,11 +72,36 @@ class _TranslateScreenState extends State<TranslateScreen>
     _initTts();
     _loadCameras();
     _setupWebSocket();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final token = context.read<AuthProvider>().token ?? '';
-      _wsService.connect(token);
-    });
+    if (kIsWeb) {
+      unawaited(_refreshApiHealth());
+      _apiHealthTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => unawaited(_refreshApiHealth()),
+      );
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final token = context.read<AuthProvider>().token ?? '';
+        _wsService.connect(token);
+      });
+    }
+  }
+
+  Future<void> _refreshApiHealth() async {
+    final apiBase = dotenv.env['API_BASE_URL'];
+    if (apiBase == null || apiBase.isEmpty) return;
+    var reachable = false;
+    try {
+      final response = await http
+          .get(Uri.parse('$apiBase/'))
+          .timeout(const Duration(seconds: 3));
+      reachable = response.statusCode == 200;
+    } catch (_) {
+      reachable = false;
+    }
+    if (!mounted || reachable == _apiServerReachable) return;
+    setState(() => _apiServerReachable = reachable);
+    context.read<TranslationProvider>().setConnected(reachable);
   }
 
   void _initTts() async {
@@ -97,13 +137,42 @@ class _TranslateScreenState extends State<TranslateScreen>
       if (!mounted) return;
       _cameras = cameras;
       if (_cameras.isEmpty) {
-        setState(() => _statusMessage = 'No cameras found');
+        setState(() => _statusMessage =
+            'No camera found. In Chrome, allow camera access for this site and select vivo Virtual Camera; then refresh the camera list.');
         return;
       }
       await _queueCameraOperation(() => _initCamera(_cameras[_selectedCamera]));
     } catch (e) {
       if (mounted) setState(() => _statusMessage = 'Camera error: $e');
     }
+  }
+
+  Future<void> _refreshCameraList() async {
+    if (_cameraOperations != 0 || !_cameraActive) return;
+    setState(() {
+      _cameraInitialized = false;
+      _statusMessage = 'Searching for cameras…';
+    });
+    await _queueCameraOperation(() async {
+      await _releaseCamera();
+      try {
+        final cameras = await availableCameras();
+        if (!mounted || !_cameraActive) return;
+        _cameras = cameras;
+        if (_cameras.isEmpty) {
+          setState(() => _statusMessage =
+              'No camera found. Turn on vivo Virtual Camera, allow Chrome camera access, then tap Refresh camera list.');
+          return;
+        }
+        _selectedCamera = _selectedCamera.clamp(0, _cameras.length - 1).toInt();
+        await _initCamera(_cameras[_selectedCamera]);
+      } catch (error) {
+        if (mounted) {
+          setState(() => _statusMessage =
+              'Camera could not start: $error. Reconnect vivo Virtual Camera and tap Refresh camera list.');
+        }
+      }
+    });
   }
 
   Future<void> _releaseCamera() async {
@@ -151,6 +220,7 @@ class _TranslateScreenState extends State<TranslateScreen>
       if (!mounted) return;
       setState(() {
         _confidence = confidence;
+        _personalMatch = false;
       });
       context.read<TranslationProvider>().updateTranslation(label);
     };
@@ -160,8 +230,10 @@ class _TranslateScreenState extends State<TranslateScreen>
       context.read<TranslationProvider>().setConnected(connected);
       if (connected) _wsService.sendConfig(_inferenceMode);
       setState(() {
-        _statusMessage = connected 
-            ? (_isStreaming ? 'Connected to server. Streaming...' : 'Connected to server. Ready.') 
+        _statusMessage = connected
+            ? (_isStreaming
+                ? 'Connected to server. Streaming...'
+                : 'Connected to server. Ready.')
             : 'Disconnected';
       });
     };
@@ -172,12 +244,28 @@ class _TranslateScreenState extends State<TranslateScreen>
     };
   }
 
-  Future<void> _startStreaming() => _queueCameraOperation(_startCameraStream);
+  Future<void> _startStreaming() {
+    if (kIsWeb) {
+      // Keep the rolling recorder outside the serialized camera-operation
+      // queue so the Stop button remains usable while a clip is analyzed.
+      final task = _cameraTask.then((_) => _startCameraStream());
+      _webRecognitionTask = task;
+      return task.whenComplete(() => _webRecognitionTask = null);
+    }
+    return _queueCameraOperation(_startCameraStream);
+  }
 
   Future<void> _startCameraStream() async {
     final controller = _cameraController;
-    if (!mounted || !_cameraActive || controller == null ||
-        !controller.value.isInitialized || controller.value.isStreamingImages) {
+    if (!mounted ||
+        !_cameraActive ||
+        controller == null ||
+        !controller.value.isInitialized ||
+        controller.value.isStreamingImages) {
+      return;
+    }
+    if (kIsWeb) {
+      await _startWebContinuousRecognition(controller);
       return;
     }
     if (!_wsService.isConnected) {
@@ -186,8 +274,11 @@ class _TranslateScreenState extends State<TranslateScreen>
     }
     _lastFrameTime = null;
     await controller.startImageStream((CameraImage image) {
-      if (!mounted || !_cameraActive || !_isStreaming ||
-          controller != _cameraController || !_wsService.isConnected) {
+      if (!mounted ||
+          !_cameraActive ||
+          !_isStreaming ||
+          controller != _cameraController ||
+          !_wsService.isConnected) {
         return;
       }
       final now = _frameClock.elapsedMilliseconds;
@@ -213,6 +304,162 @@ class _TranslateScreenState extends State<TranslateScreen>
     });
   }
 
+  Future<void> _startWebContinuousRecognition(
+    CameraController controller,
+  ) async {
+    await _refreshApiHealth();
+    if (!_apiServerReachable) {
+      setState(() {
+        _recognitionStage = 'Server offline';
+        _statusMessage =
+            'Recognition server is not reachable. Start it and retry.';
+      });
+      return;
+    }
+    final auth = context.read<AuthProvider>();
+    final token = auth.token ?? '';
+    if (token.isEmpty) {
+      setState(() => _statusMessage = 'Please sign in before translating.');
+      return;
+    }
+    final apiBase = dotenv.env['API_BASE_URL'];
+    if (apiBase == null || apiBase.isEmpty) {
+      setState(
+          () => _statusMessage = 'Local recognition server is not configured.');
+      return;
+    }
+
+    _continuousWords.clear();
+    _lastContinuousLabel = '';
+    _webRecognitionRunning = true;
+    context.read<TranslationProvider>().clearCurrentTranslation();
+    setState(() {
+      _isStreaming = true;
+      _confidence = 0;
+      _personalMatch = false;
+      _recognitionStage = 'Capturing camera';
+      _signalSummary = 'Waiting for an 8-frame sample';
+      _modelReadout = 'Waiting for a sign';
+      _statusMessage =
+          'Continuous mode: make one sign at a time. Building phrase…';
+    });
+
+    final uri = Uri.parse('$apiBase/me/signs/predict');
+    while (mounted &&
+        _cameraActive &&
+        _isStreaming &&
+        controller == _cameraController) {
+      try {
+        if (mounted) {
+          setState(() => _recognitionStage = 'Capturing camera clip…');
+        }
+        await controller.startVideoRecording();
+        await Future<void>.delayed(const Duration(seconds: 2));
+        final clip = await controller.stopVideoRecording();
+        if (!mounted || !_isStreaming || controller != _cameraController) break;
+
+        setState(() => _recognitionStage = 'Finding body, hands and face…');
+
+        final response = await http
+            .post(
+              uri,
+              headers: {
+                'Authorization': 'Bearer $token',
+                'Content-Type': 'application/octet-stream',
+              },
+              body: await clip.readAsBytes(),
+            )
+            .timeout(const Duration(seconds: 25));
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        if (response.statusCode != 200) {
+          throw Exception(
+              data['error'] ?? data['detail'] ?? 'Recognition request failed');
+        }
+
+        final accepted = data['accepted'] == true;
+        final label = data['label']?.toString() ?? '';
+        final unsure = data['decision'] == 'confirm';
+        final signals =
+            (data['signals'] as Map?)?.cast<String, dynamic>() ?? {};
+        final frames = signals['frames_analyzed'] ?? 0;
+        final bodyFrames = signals['body_frames'] ?? 0;
+        final handFrames = signals['hands_frames'] ?? 0;
+        final faceFrames = signals['face_frames'] ?? 0;
+        final candidate = data['suggestion']?.toString() ?? '';
+        final detectedName =
+            candidate.isEmpty ? 'none' : _displaySignLabel(candidate);
+        if (accepted && label.isNotEmpty) {
+          if (label != _lastContinuousLabel) {
+            _continuousWords.add(_displaySignLabel(label));
+            _lastContinuousLabel = label;
+            context.read<TranslationProvider>().updateTranslation(
+                  _continuousWords.join(' '),
+                );
+          }
+          setState(() {
+            // Personal matches report a match decision, not a probability.
+            _confidence = 0;
+            _personalMatch = true;
+            _signalSummary =
+                '$frames frames • body $bodyFrames/$frames • hands $handFrames/$frames • face $faceFrames/$frames';
+            _modelReadout = '✓ $detectedName • MATCH';
+            _recognitionStage = 'Sign matched';
+            _statusMessage =
+                'Detected ${_displaySignLabel(label)}. Continue signing…';
+          });
+        } else {
+          // An uncertain/no-sign window releases the duplicate guard so the
+          // same word can be signed again after a short pause.
+          _lastContinuousLabel = '';
+          setState(() {
+            _signalSummary =
+                '$frames frames • body $bodyFrames/$frames • hands $handFrames/$frames • face $faceFrames/$frames';
+            _modelReadout = unsure
+                ? '? Maybe $detectedName — repeat the sign'
+                : '✗ No clear sign — repeat it';
+            _recognitionStage = 'Signals found; no safe match';
+            _statusMessage = 'Listening for the next clear sign…';
+          });
+        }
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            _recognitionStage = 'Recognition error';
+            _modelReadout = error.toString();
+            _statusMessage = 'Recognition stopped: $error';
+            _isStreaming = false;
+          });
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _isStreaming = false;
+        _webRecognitionRunning = false;
+        if (_continuousWords.isNotEmpty) {
+          _statusMessage = 'Phrase ready. Speaking it aloud…';
+        } else if (!_statusMessage.startsWith('Recognition stopped:')) {
+          _statusMessage =
+              'No clear signs yet. Try a slower sign with hands in frame.';
+        }
+      });
+    }
+    if (mounted && _continuousWords.isNotEmpty) {
+      await _speak(_continuousWords.join(' '));
+    }
+    if (mounted && !_cameraActive) {
+      unawaited(_queueCameraOperation(_releaseCamera));
+    }
+  }
+
+  String _displaySignLabel(String label) => switch (label) {
+        'all_right' => 'All right',
+        'good_morning' => 'Good morning',
+        'thank_you' => 'Thank you',
+        _ => label.replaceAll('_', ' '),
+      };
+
   Future<void> _stopCameraStream() async {
     _isStreaming = false;
     final controller = _cameraController;
@@ -225,8 +472,34 @@ class _TranslateScreenState extends State<TranslateScreen>
     _isStreaming = false;
     return _queueCameraOperation(() async {
       await _stopCameraStream();
-      if (mounted) setState(() => _statusMessage = 'Stopped. Tap Start to resume.');
+      if (mounted)
+        setState(() => _statusMessage = 'Stopped. Tap Start to resume.');
     });
+  }
+
+  Future<void> _openPersonalSigns() async {
+    if (_isStreaming || _webRecognitionRunning) {
+      await _stopStreaming();
+      while (_webRecognitionRunning && mounted) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    _cameraActive = false;
+    await _queueCameraOperation(_releaseCamera);
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PersonalSignsScreen(
+          initialCameras: _cameras,
+          initialCameraIndex: _selectedCamera,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _cameraActive = true;
+    if (_cameras.isNotEmpty) {
+      await _queueCameraOperation(() => _initCamera(_cameras[_selectedCamera]));
+    }
   }
 
   Future<void> _speak(String text) async {
@@ -265,30 +538,54 @@ class _TranslateScreenState extends State<TranslateScreen>
     }
   }
 
-  Future<void> _switchCamera() => _queueCameraOperation(() async {
-    if (!mounted || !_cameraActive || _cameras.length < 2) return;
-    final wasStreaming = _isStreaming;
-    setState(() {
-      _cameraInitialized = false;
-      _statusMessage = 'Switching camera...';
-    });
-    _selectedCamera = (_selectedCamera + 1) % _cameras.length;
-    await _initCamera(_cameras[_selectedCamera]);
-    if (wasStreaming && mounted && _cameraActive && _cameraInitialized) {
-      await _startCameraStream();
+  Future<void> _selectCamera(int? cameraIndex) =>
+      _queueCameraOperation(() async {
+        if (!mounted ||
+            !_cameraActive ||
+            cameraIndex == null ||
+            cameraIndex < 0 ||
+            cameraIndex >= _cameras.length ||
+            cameraIndex == _selectedCamera) {
+          return;
+        }
+
+        final wasStreaming = _isStreaming;
+        setState(() {
+          _cameraInitialized = false;
+          _statusMessage = 'Switching camera...';
+        });
+        _selectedCamera = cameraIndex;
+        await _initCamera(_cameras[_selectedCamera]);
+        if (wasStreaming && mounted && _cameraActive && _cameraInitialized) {
+          await _startCameraStream();
+        }
+      });
+
+  String _cameraLabel(CameraDescription camera) {
+    final name = camera.name.trim();
+    if (name.isNotEmpty) return name;
+    switch (camera.lensDirection) {
+      case CameraLensDirection.front:
+        return 'Front camera';
+      case CameraLensDirection.back:
+        return 'Back camera';
+      case CameraLensDirection.external:
+        return 'External camera';
     }
-  });
+  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _cameraActive = true;
       if (_cameras.isNotEmpty) {
-        unawaited(_queueCameraOperation(() => _initCamera(_cameras[_selectedCamera])));
+        unawaited(_queueCameraOperation(
+            () => _initCamera(_cameras[_selectedCamera])));
       }
     } else {
       _cameraActive = false;
       _isStreaming = false;
+      if (kIsWeb && _webRecognitionRunning) return;
       unawaited(_queueCameraOperation(_releaseCamera));
     }
   }
@@ -296,6 +593,7 @@ class _TranslateScreenState extends State<TranslateScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _apiHealthTimer?.cancel();
     _cameraActive = false;
     _isStreaming = false;
     _wsService.onTranslation = null;
@@ -303,7 +601,9 @@ class _TranslateScreenState extends State<TranslateScreen>
     _wsService.onError = null;
     unawaited(_wsService.disconnect());
     // Chain cleanup after an in-progress start/stop/initialization operation.
-    _cameraTask = _cameraTask.then((_) => _releaseCamera()).catchError((Object e) {
+    _cameraTask = (_webRecognitionTask ?? _cameraTask)
+        .then((_) => _releaseCamera())
+        .catchError((Object e) {
       debugPrint('Camera cleanup failed: $e');
     });
     _tts.stop();
@@ -314,6 +614,8 @@ class _TranslateScreenState extends State<TranslateScreen>
   Widget build(BuildContext context) {
     final translationProvider = context.watch<TranslationProvider>();
     final currentTranslation = translationProvider.currentTranslation;
+    final serverConnected =
+        kIsWeb ? _apiServerReachable : translationProvider.isConnected;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -339,6 +641,17 @@ class _TranslateScreenState extends State<TranslateScreen>
                       style:
                           const TextStyle(color: Colors.white70, fontSize: 16),
                       textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _cameraOperations == 0 ? _refreshCameraList : null,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Refresh camera list'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white54),
+                      ),
                     ),
                   ],
                 ),
@@ -406,7 +719,7 @@ class _TranslateScreenState extends State<TranslateScreen>
                     padding:
                         const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                     decoration: BoxDecoration(
-                      color: translationProvider.isConnected
+                      color: serverConnected
                           ? Colors.green.withValues(alpha: 0.3)
                           : Colors.red.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(20),
@@ -415,19 +728,15 @@ class _TranslateScreenState extends State<TranslateScreen>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          translationProvider.isConnected
-                              ? Icons.cloud_done
-                              : Icons.cloud_off,
-                          color: translationProvider.isConnected
+                          serverConnected ? Icons.cloud_done : Icons.cloud_off,
+                          color: serverConnected
                               ? Colors.greenAccent
                               : Colors.redAccent,
                           size: 14,
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          translationProvider.isConnected
-                              ? 'Server'
-                              : 'No Server',
+                          serverConnected ? 'Server' : 'No Server',
                           style: const TextStyle(
                               color: Colors.white, fontSize: 11),
                         ),
@@ -439,7 +748,8 @@ class _TranslateScreenState extends State<TranslateScreen>
                   GestureDetector(
                     onTap: () {
                       final modes = ['frames', 'video', 'hybrid'];
-                      final next = modes[(modes.indexOf(_inferenceMode) + 1) % modes.length];
+                      final next = modes[
+                          (modes.indexOf(_inferenceMode) + 1) % modes.length];
                       setState(() => _inferenceMode = next);
                       _wsService.sendConfig(next);
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -450,47 +760,116 @@ class _TranslateScreenState extends State<TranslateScreen>
                       );
                     },
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 5),
                       decoration: BoxDecoration(
                         color: Colors.blueAccent.withValues(alpha: 0.3),
                         borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.5)),
+                        border: Border.all(
+                            color: Colors.blueAccent.withValues(alpha: 0.5)),
                       ),
                       child: Row(
                         children: [
                           Icon(
-                            _inferenceMode == 'frames' ? Icons.bolt : 
-                            _inferenceMode == 'video' ? Icons.movie : Icons.auto_awesome,
-                            color: Colors.blueAccent, size: 14,
+                            _inferenceMode == 'frames'
+                                ? Icons.bolt
+                                : _inferenceMode == 'video'
+                                    ? Icons.movie
+                                    : Icons.auto_awesome,
+                            color: Colors.blueAccent,
+                            size: 14,
                           ),
                           const SizedBox(width: 4),
                           Text(
                             _inferenceMode.toUpperCase(),
-                            style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold),
                           ),
                         ],
                       ),
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // Switch Camera
-                  if (_cameras.length > 1)
-                    GestureDetector(
-                      onTap: _cameraOperations == 0 ? _switchCamera : null,
-                      child: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.15),
-                          shape: BoxShape.circle,
+                  // Select a camera by its browser/device name. This also
+                  // exposes external cameras supplied by phone-link apps.
+                  Container(
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.42,
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<int>(
+                        value: _cameras.isEmpty
+                            ? -1
+                            : _selectedCamera < _cameras.length
+                                ? _selectedCamera
+                                : null,
+                        isDense: true,
+                        isExpanded: false,
+                        dropdownColor: const Color(0xFF25264F),
+                        iconEnabledColor: Colors.white,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
                         ),
-                        child: const Icon(Icons.flip_camera_ios,
-                            color: Colors.white, size: 20),
+                        hint: Text(
+                          _cameras.isEmpty
+                              ? 'Search for cameras'
+                              : 'Choose camera',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        onChanged:
+                            _cameraOperations == 0 && !_webRecognitionRunning
+                                ? (index) => index == -1
+                                    ? _refreshCameraList()
+                                    : _selectCamera(index)
+                                : null,
+                        items: _cameras.isEmpty
+                            ? const [
+                                DropdownMenuItem<int>(
+                                  value: -1,
+                                  child: Text('Search cameras again'),
+                                ),
+                              ]
+                            : List.generate(_cameras.length, (index) {
+                                final camera = _cameras[index];
+                                return DropdownMenuItem<int>(
+                                  value: index,
+                                  child: ConstrainedBox(
+                                    constraints: BoxConstraints(
+                                      maxWidth:
+                                          MediaQuery.of(context).size.width *
+                                              0.38,
+                                    ),
+                                    child: Text(
+                                      _cameraLabel(camera),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                );
+                              }),
                       ),
                     ),
+                  ),
                 ],
               ),
             ),
           ),
+
+          if (kIsWeb)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 62,
+              left: 16,
+              right: 16,
+              child: _buildRecognitionFlow(serverConnected),
+            ),
 
           // ── Bottom Translation Panel ──
           Positioned(
@@ -524,7 +903,8 @@ class _TranslateScreenState extends State<TranslateScreen>
                         color: Colors.white.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(16),
                         border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.2), width: 1),
+                            color: Colors.white.withValues(alpha: 0.2),
+                            width: 1),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -545,6 +925,14 @@ class _TranslateScreenState extends State<TranslateScreen>
                                   '${(_confidence * 100).toStringAsFixed(0)}%',
                                   style: const TextStyle(
                                       color: Colors.white70, fontSize: 12),
+                                )
+                              else if (_personalMatch)
+                                const Text(
+                                  '✓ MATCH',
+                                  style: TextStyle(
+                                      color: Colors.greenAccent,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold),
                                 ),
                             ],
                           ),
@@ -564,7 +952,8 @@ class _TranslateScreenState extends State<TranslateScreen>
                               borderRadius: BorderRadius.circular(4),
                               child: LinearProgressIndicator(
                                 value: _confidence,
-                                backgroundColor: Colors.white.withValues(alpha: 0.2),
+                                backgroundColor:
+                                    Colors.white.withValues(alpha: 0.2),
                                 valueColor: const AlwaysStoppedAnimation(
                                     Colors.greenAccent),
                                 minHeight: 4,
@@ -636,18 +1025,31 @@ class _TranslateScreenState extends State<TranslateScreen>
                     ),
                   ],
 
+                  SizedBox(
+                    width: double.infinity,
+                    child: TextButton.icon(
+                      onPressed:
+                          _cameraOperations == 0 ? _openPersonalSigns : null,
+                      icon: const Icon(Icons.sign_language),
+                      label: const Text(
+                          'Teach it your signs / Personal recognition'),
+                      style:
+                          TextButton.styleFrom(foregroundColor: Colors.white),
+                    ),
+                  ),
                   Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: Text(_statusMessage,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 12)),
                   ),
                   // Start / Stop button
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: _isStreaming
+                        backgroundColor: _isStreaming || _webRecognitionRunning
                             ? Colors.red.shade600
                             : const Color(0xFF4B6CF7),
                         foregroundColor: Colors.white,
@@ -657,14 +1059,19 @@ class _TranslateScreenState extends State<TranslateScreen>
                         ),
                         elevation: 4,
                       ),
-                      onPressed: _cameraInitialized && _cameraOperations == 0
-                          ? (_isStreaming ? _stopStreaming : _startStreaming)
+                      onPressed: _cameraInitialized &&
+                              (_cameraOperations == 0 || _webRecognitionRunning)
+                          ? (_isStreaming || _webRecognitionRunning
+                              ? _stopStreaming
+                              : _startStreaming)
                           : null,
-                      icon: Icon(_isStreaming
+                      icon: Icon(_isStreaming || _webRecognitionRunning
                           ? Icons.stop_circle_outlined
                           : Icons.play_circle_outlined),
                       label: Text(
-                        _isStreaming ? 'Stop Streaming' : 'Start Translating',
+                        _isStreaming || _webRecognitionRunning
+                            ? 'Stop Streaming'
+                            : 'Start Translating',
                         style: const TextStyle(
                             fontSize: 16, fontWeight: FontWeight.w600),
                       ),
@@ -674,6 +1081,109 @@ class _TranslateScreenState extends State<TranslateScreen>
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecognitionFlow(bool serverConnected) {
+    final analyzed = _signalSummary != 'No clip analyzed yet' &&
+        _signalSummary != 'Waiting for an 8-frame sample';
+    final matched = _recognitionStage == 'Sign matched';
+    final uncertain = _recognitionStage == 'Signals found; no safe match';
+    return IgnorePointer(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.68),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.20)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'SIGN RECOGNITION FLOW',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.1,
+              ),
+            ),
+            const SizedBox(height: 7),
+            Wrap(
+              spacing: 6,
+              runSpacing: 5,
+              children: [
+                _flowChip('CAMERA', _cameraInitialized, Icons.camera_alt),
+                _flowChip('BODY', analyzed, Icons.accessibility_new),
+                _flowChip('HANDS', analyzed, Icons.back_hand),
+                _flowChip('FACE', analyzed, Icons.face),
+                _flowChip(
+                  'MODEL',
+                  matched,
+                  matched ? Icons.check_circle : Icons.psychology,
+                  warning: uncertain || !serverConnected,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _recognitionStage,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: uncertain
+                    ? Colors.orangeAccent
+                    : matched
+                        ? Colors.greenAccent
+                        : Colors.white70,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Text(
+              _signalSummary,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white70, fontSize: 10),
+            ),
+            Text(
+              'Model: $_modelReadout',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _flowChip(String label, bool complete, IconData icon,
+      {bool warning = false}) {
+    final color = warning
+        ? Colors.orangeAccent
+        : complete
+            ? Colors.greenAccent
+            : Colors.white54;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(label,
+              style: TextStyle(
+                  color: color, fontSize: 9, fontWeight: FontWeight.bold)),
         ],
       ),
     );
