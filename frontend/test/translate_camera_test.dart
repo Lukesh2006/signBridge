@@ -197,7 +197,10 @@ void main() {
   testWidgets('switching cameras disposes the old controller exactly once',
       (tester) async {
     await show(tester);
-    await tester.tap(find.byIcon(Icons.flip_camera_ios));
+    // The camera is chosen from a dropdown listing each camera by name.
+    await tester.tap(find.byType(DropdownButton<int>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('front').last);
     await tester.pumpAndSettle();
     expect(camera.events,
         ['create:rear', 'dispose:0', 'disposed:0', 'create:front']);

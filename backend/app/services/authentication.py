@@ -26,7 +26,7 @@ import requests
 from firebase_admin import auth
 from firebase_admin.exceptions import FirebaseError
 
-from app.config.firebase_admin_init import admin_auth
+from app.config.firebase_admin_init import FIREBASE_CONFIG_PATH as _CONFIG_PATH, admin_auth
 
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
-FIREBASE_CONFIG_PATH: Final[Path] = PROJECT_ROOT / "firebase.json"
+FIREBASE_CONFIG_PATH: Final[Path] = _CONFIG_PATH
 
 with FIREBASE_CONFIG_PATH.open(encoding="utf-8") as file:
     _firebase_config = json.load(file)
