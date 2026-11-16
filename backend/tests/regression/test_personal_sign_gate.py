@@ -278,5 +278,89 @@ class PredictBandTests(_GateTestCase):
         self.assertEqual(result["kind"], "isl")
 
 
+def _reference_sequence_distance(first: np.ndarray, second: np.ndarray) -> float:
+    """The original frame-by-frame DTW, kept to check the vectorized version."""
+    rows, columns = len(first), len(second)
+    costs = np.full((rows + 1, columns + 1), np.inf, dtype=np.float32)
+    costs[0, 0] = 0.0
+    for row in range(1, rows + 1):
+        for column in range(1, columns + 1):
+            costs[row, column] = psm._frame_distance(first[row - 1], second[column - 1]) + min(
+                costs[row - 1, column], costs[row, column - 1], costs[row - 1, column - 1]
+            )
+    return float(costs[rows, columns] / (rows + columns))
+
+
+def _random_frames(rng, count: int) -> np.ndarray:
+    """Frames with randomly missing landmarks and faces, like real MediaPipe output."""
+    frames = np.zeros((count, psm.FEATURE_COUNT), dtype=np.float32)
+    points = rng.uniform(0.0, 1.0, size=(count, 75, 3)).astype(np.float32)
+    points[rng.uniform(size=(count, 75)) < 0.3] = 0.0
+    points[0, :] = 0.0  # one frame with nothing tracked
+    frames[:, : psm.LANDMARK_VALUE_COUNT] = points.reshape(count, -1)
+    frames[:, psm.LANDMARK_VALUE_COUNT : psm.FACE_PRESENT_INDEX] = rng.uniform(size=(count, 52))
+    frames[:, psm.FACE_PRESENT_INDEX] = rng.uniform(size=count) < 0.5
+    return frames
+
+
+class DistanceTests(unittest.TestCase):
+    def test_vectorized_frame_distances_match_single_frame_version(self):
+        rng = np.random.default_rng(7)
+        first, second = _random_frames(rng, 9), _random_frames(rng, 12)
+        pairwise = psm._pairwise_frame_distances(first, second)
+        for row in range(len(first)):
+            for column in range(len(second)):
+                self.assertAlmostEqual(
+                    pairwise[row, column], psm._frame_distance(first[row], second[column]), places=5
+                )
+
+    def test_sequence_distance_matches_original_dtw(self):
+        rng = np.random.default_rng(11)
+        for rows, columns in ((16, 16), (8, 16), (5, 3)):
+            first, second = _random_frames(rng, rows), _random_frames(rng, columns)
+            self.assertAlmostEqual(
+                psm.sequence_distance(first, second),
+                _reference_sequence_distance(first, second),
+                places=5,
+            )
+
+
+class _FakeCapture:
+    """Stands in for cv2.VideoCapture: frame N is an array filled with N."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.position = 0
+        self.decoded = 0
+
+    def _advance(self) -> bool:
+        if self.position >= self.total:
+            return False
+        self.position += 1
+        self.decoded += 1
+        return True
+
+    def grab(self) -> bool:
+        return self._advance()
+
+    def read(self):
+        index = self.position
+        return (True, np.full((2, 2, 3), index, dtype=np.uint8)) if self._advance() else (False, None)
+
+
+class ReadFramesTests(unittest.TestCase):
+    def test_reads_only_sampled_frames_in_one_pass(self):
+        cap = _FakeCapture(total=55)
+        indices = np.linspace(0, 54, 16).astype(int)
+        frames = psm._read_frames(cap, indices)
+        self.assertEqual(sorted(frames), sorted(set(indices.tolist())))
+        self.assertTrue(all(frames[index][0, 0, 0] == index for index in frames))
+        self.assertEqual(cap.decoded, 55)
+
+    def test_stops_at_end_when_frame_count_is_overstated(self):
+        frames = psm._read_frames(_FakeCapture(total=10), np.array([0, 5, 12, 15]))
+        self.assertEqual(sorted(frames), [0, 5])
+
+
 if __name__ == "__main__":
     unittest.main()

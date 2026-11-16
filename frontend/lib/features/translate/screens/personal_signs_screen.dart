@@ -426,15 +426,16 @@ class _PersonalSignsScreenState extends State<PersonalSignsScreen> {
         throw Exception(
             data['error'] ?? data['detail'] ?? 'Recognition failed');
       final suggestion = (data['suggestion'] ?? data['label'] ?? '').toString();
-      final percent = ((data['confidence'] as num) * 100).round();
       final decision = data['decision'] ??
           (data['accepted'] == true ? 'accepted' : 'rejected');
+      // The server's "confidence" is a rescaled match distance, not a
+      // probability (a correct sign can score under 50%), so show the decision.
       setState(() {
         _result = switch (decision) {
           'accepted' =>
-            'Recognized: ${_readable(suggestion)} ($percent%) · ${_kindNote(data!['kind'])}',
-          'confirm' => 'Maybe ${_readable(suggestion)} ($percent%)',
-          _ => '${data!['reason'] ?? 'Not sure.'}'
+            '✓ Recognized: ${_readable(suggestion)} · ${_kindNote(data!['kind'])}',
+          'confirm' => '? Not sure. Maybe ${_readable(suggestion)}',
+          _ => '✗ ${data!['reason'] ?? 'Not recognized.'}'
               '${suggestion.isEmpty ? '' : ' Closest sign: ${_readable(suggestion)}.'}',
         };
         _status = 'Recognition stays on this laptop.';

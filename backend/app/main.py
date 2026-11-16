@@ -131,12 +131,15 @@ async def lifespan(app: FastAPI):
         target=model_api.check_health, 
         daemon=True
         ).start()
+    # Build the personal-sign MediaPipe detectors now, not on the first clip.
+    personal_sign_model.warm_up_extractors()
     yield
     executor.shutdown(wait=False)
     # Stop accepting new work in the shared SLT pools and let
     # in-flight jobs finish without blocking shutdown.
     slt_landmark_executor.shutdown(wait=False)
     slt_inference_executor.shutdown(wait=False)
+    personal_sign_model.shutdown_extractors()
 
 
 app = FastAPI(lifespan=lifespan)

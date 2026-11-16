@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -67,6 +70,15 @@ ACCEPT_DISTANCE = 0.10
 ACCEPT_GAP = 0.004
 CONFIRM_DISTANCE = 0.14
 PREDICT_MIN_HANDS_RATIO = 0.5
+
+# Building the three MediaPipe detectors takes seconds, so each worker thread
+# builds its own set once and keeps it. Detectors are not thread-safe, which is
+# why they are per thread; frames of one clip are spread across the workers.
+EXTRACT_WORKERS = max(1, min(4, (os.cpu_count() or 1) // 3))
+_extract_pool: ThreadPoolExecutor | None = None
+_extract_pool_lock = threading.Lock()
+_thread_state = threading.local()
+_all_detectors: list[tuple] = []
 
 
 def _build_face_landmarker():
@@ -152,6 +164,85 @@ def _frame_feature(
     return values
 
 
+def _thread_detectors() -> tuple:
+    """This worker thread's (pose, hand, face) detectors, built on first use."""
+    detectors = getattr(_thread_state, "detectors", None)
+    if detectors is None:
+        pose_detector, hand_detector = build_landmarkers()
+        detectors = (pose_detector, hand_detector, _build_face_landmarker())
+        _thread_state.detectors = detectors
+        with _extract_pool_lock:
+            _all_detectors.append(detectors)
+    return detectors
+
+
+def _extract_executor() -> ThreadPoolExecutor:
+    global _extract_pool
+    with _extract_pool_lock:
+        if _extract_pool is None:
+            _extract_pool = ThreadPoolExecutor(
+                max_workers=EXTRACT_WORKERS, thread_name_prefix="sign-extract"
+            )
+        return _extract_pool
+
+
+def _features_for_frame(frame: np.ndarray) -> list[float]:
+    pose_detector, hand_detector, face_detector = _thread_detectors()
+    if pose_detector is None and hand_detector is None and face_detector is None:
+        raise RuntimeError("MediaPipe pose, hand and face models are unavailable on the USB drive.")
+    return _frame_feature(frame, pose_detector, hand_detector, face_detector).tolist()
+
+
+def warm_up_extractors() -> None:
+    """Build every worker's detectors in the background so the first clip is not slow."""
+    pool = _extract_executor()
+    for _ in range(EXTRACT_WORKERS):
+        pool.submit(_thread_detectors)
+
+
+def shutdown_extractors() -> None:
+    """Stop the workers and close their detectors while MediaPipe can still do so.
+
+    Left to garbage collection at interpreter exit, MediaPipe's own close fails
+    and prints a traceback for every detector.
+    """
+    global _extract_pool
+    with _extract_pool_lock:
+        pool, _extract_pool = _extract_pool, None
+    if pool is not None:
+        # Wait first so detectors still being built are registered and closed.
+        pool.shutdown(wait=True, cancel_futures=True)
+    with _extract_pool_lock:
+        detectors, _all_detectors[:] = list(_all_detectors), []
+    for detector in (item for group in detectors for item in group):
+        if detector is not None:
+            try:
+                detector.close()
+            except Exception:
+                logger.exception("Could not close a MediaPipe detector")
+
+
+def _read_frames(cap, indices: np.ndarray) -> dict[int, np.ndarray]:
+    """Decode the clip once from the start and keep only the sampled frames.
+
+    Seeking with CAP_PROP_POS_FRAMES re-decodes from a keyframe on every call,
+    which is much slower than one pass over a short clip.
+    """
+    wanted = set(int(index) for index in indices)
+    last = max(wanted)
+    frames: dict[int, np.ndarray] = {}
+    for position in range(last + 1):
+        if position in wanted:
+            ok, frame = cap.read()
+            if ok:
+                frames[position] = frame
+        else:
+            ok = cap.grab()
+        if not ok:
+            break
+    return frames
+
+
 def extract_sequence(video_bytes: bytes, frame_count: int = FRAME_COUNT) -> list[list[float]]:
     """Sample a local MP4/WebM in memory; never copies it to laptop temp storage."""
     # OpenCV's video decoder needs a path. Use the USB repo itself for its
@@ -161,7 +252,6 @@ def extract_sequence(video_bytes: bytes, frame_count: int = FRAME_COUNT) -> list
     extension = ".webm" if video_bytes.startswith(b"\x1a\x45\xdf\xa3") else ".mp4"
     temp_path = temp_dir / f"clip_{time.time_ns()}{extension}"
     cap = None
-    pose_detector = hand_detector = face_detector = None
     try:
         temp_path.write_bytes(video_bytes)
         cap = cv2.VideoCapture(str(temp_path))
@@ -171,32 +261,22 @@ def extract_sequence(video_bytes: bytes, frame_count: int = FRAME_COUNT) -> list
         if frame_total < 2:
             raise ValueError("The video is too short or contains no readable frames.")
         sample_indices = np.linspace(0, max(frame_total - 1, 0), frame_count).astype(int)
-        pose_detector, hand_detector = build_landmarkers()
-        face_detector = _build_face_landmarker()
-        if pose_detector is None and hand_detector is None and face_detector is None:
-            raise RuntimeError("MediaPipe pose, hand and face models are unavailable on the USB drive.")
-        sequence: list[list[float]] = []
-        for frame_index in sample_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            sequence.append(
-                _frame_feature(frame, pose_detector, hand_detector, face_detector).tolist()
-            )
-        if len(sequence) < 4:
-            raise ValueError("Could not extract enough frames. Keep your hands visible and retry.")
-        return sequence
+        frames = _read_frames(cap, sample_indices)
     finally:
         if cap is not None:
             cap.release()
-        for detector in (pose_detector, hand_detector, face_detector):
-            if detector is not None:
-                detector.close()
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not remove temporary clip %s", temp_path)
+
+    # Short clips repeat sample indices; analyze each distinct frame once.
+    positions = sorted(frames)
+    features = dict(zip(positions, _extract_executor().map(_features_for_frame, [frames[p] for p in positions])))
+    sequence = [features[int(index)] for index in sample_indices if int(index) in features]
+    if len(sequence) < 4:
+        raise ValueError("Could not extract enough frames. Keep your hands visible and retry.")
+    return sequence
 
 
 def _safe_uid(user_id: str) -> str:
@@ -303,20 +383,54 @@ def _frame_distance(first: np.ndarray, second: np.ndarray) -> float:
     return landmark_distance
 
 
+def _pairwise_frame_distances(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """_frame_distance for every (first frame, second frame) pair at once."""
+    first_points = first[:, :LANDMARK_VALUE_COUNT].reshape(len(first), 75, 3)
+    second_points = second[:, :LANDMARK_VALUE_COUNT].reshape(len(second), 75, 3)
+    first_seen = np.linalg.norm(first_points, axis=2) > 1e-5
+    second_seen = np.linalg.norm(second_points, axis=2) > 1e-5
+    common = first_seen[:, None, :] & second_seen[None, :, :]
+    common_count = common.sum(axis=2)
+    union_count = (first_seen[:, None, :] | second_seen[None, :, :]).sum(axis=2)
+    mismatch_count = (first_seen[:, None, :] ^ second_seen[None, :, :]).sum(axis=2)
+    point_gaps = np.linalg.norm(first_points[:, None] - second_points[None, :], axis=3)
+    enough = common_count >= 5
+    landmark = np.where(
+        enough,
+        (point_gaps * common).sum(axis=2) / np.maximum(common_count, 1)
+        + 0.025 * mismatch_count / np.maximum(union_count, 1),
+        0.35,
+    )
+
+    first_face = first[:, FACE_PRESENT_INDEX] > 0.5
+    second_face = second[:, FACE_PRESENT_INDEX] > 0.5
+    both_faces = first_face[:, None] & second_face[None, :]
+    one_face = first_face[:, None] ^ second_face[None, :]
+    face = np.abs(
+        first[:, None, LANDMARK_VALUE_COUNT:FACE_PRESENT_INDEX]
+        - second[None, :, LANDMARK_VALUE_COUNT:FACE_PRESENT_INDEX]
+    ).mean(axis=2)
+    return np.where(both_faces, 0.70 * landmark + 0.30 * face, landmark + 0.03 * one_face)
+
+
 def sequence_distance(first: np.ndarray, second: np.ndarray) -> float:
     """Dynamic time warping over landmark and face-expression feature frames."""
     rows, columns = len(first), len(second)
-    costs = np.full((rows + 1, columns + 1), np.inf, dtype=np.float32)
-    costs[0, 0] = 0.0
-    for row in range(1, rows + 1):
+    local = _pairwise_frame_distances(
+        np.asarray(first, dtype=np.float32), np.asarray(second, dtype=np.float32)
+    ).tolist()
+    # The frame distances above are the expensive part; the 16x16 warping
+    # path itself is cheap in plain Python.
+    previous = [0.0] + [float("inf")] * columns
+    for row in range(rows):
+        current = [float("inf")] * (columns + 1)
+        local_row = local[row]
         for column in range(1, columns + 1):
-            local = _frame_distance(first[row - 1], second[column - 1])
-            costs[row, column] = local + min(
-                costs[row - 1, column],
-                costs[row, column - 1],
-                costs[row - 1, column - 1],
+            current[column] = local_row[column - 1] + min(
+                previous[column], current[column - 1], previous[column - 1]
             )
-    return float(costs[rows, columns] / max(rows + columns, 1))
+        previous = current
+    return previous[columns] / max(rows + columns, 1)
 
 
 def _signal_diagnostics(sequence: np.ndarray) -> dict[str, int | float]:
@@ -693,6 +807,8 @@ def predict_user(user_id: str, video_bytes: bytes) -> dict:
     gap = (ranked[1][0] - best_distance) if len(ranked) > 1 else 0.0
     hands_ok = signals["hands_frames"] >= PREDICT_MIN_HANDS_RATIO * max(int(signals["frames_analyzed"]), 1)
     # Initial conservative bands; real user feedback is needed to tune them.
+    # "confidence" is only a rescaled distance (an accepted sign can score
+    # under 50%), so clients should show `decision`, not this number.
     confidence = max(0.0, min(1.0, 1.0 - best_distance / CONFIRM_DISTANCE))
     if hands_ok and best_distance < ACCEPT_DISTANCE and (len(ranked) == 1 or gap > ACCEPT_GAP):
         decision, reason = "accepted", "Matched sign examples."

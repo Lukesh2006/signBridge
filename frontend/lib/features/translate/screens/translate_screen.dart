@@ -44,6 +44,8 @@ class _TranslateScreenState extends State<TranslateScreen>
   String _modelReadout = 'Waiting for a sign';
   String _statusMessage = 'Camera not started';
   double _confidence = 0;
+  // Personal-sign matches show a match badge instead of a percentage.
+  bool _personalMatch = false;
   Future<void> _cameraTask = Future<void>.value();
   Future<void>? _webRecognitionTask;
   int _cameraOperations = 0;
@@ -218,6 +220,7 @@ class _TranslateScreenState extends State<TranslateScreen>
       if (!mounted) return;
       setState(() {
         _confidence = confidence;
+        _personalMatch = false;
       });
       context.read<TranslationProvider>().updateTranslation(label);
     };
@@ -333,6 +336,7 @@ class _TranslateScreenState extends State<TranslateScreen>
     setState(() {
       _isStreaming = true;
       _confidence = 0;
+      _personalMatch = false;
       _recognitionStage = 'Capturing camera';
       _signalSummary = 'Waiting for an 8-frame sample';
       _modelReadout = 'Waiting for a sign';
@@ -374,7 +378,7 @@ class _TranslateScreenState extends State<TranslateScreen>
 
         final accepted = data['accepted'] == true;
         final label = data['label']?.toString() ?? '';
-        final confidence = (data['confidence'] as num?)?.toDouble() ?? 0;
+        final unsure = data['decision'] == 'confirm';
         final signals =
             (data['signals'] as Map?)?.cast<String, dynamic>() ?? {};
         final frames = signals['frames_analyzed'] ?? 0;
@@ -393,11 +397,12 @@ class _TranslateScreenState extends State<TranslateScreen>
                 );
           }
           setState(() {
-            _confidence = confidence;
+            // Personal matches report a match decision, not a probability.
+            _confidence = 0;
+            _personalMatch = true;
             _signalSummary =
                 '$frames frames • body $bodyFrames/$frames • hands $handFrames/$frames • face $faceFrames/$frames';
-            _modelReadout =
-                '$detectedName • ${(confidence * 100).toStringAsFixed(0)}% • MATCH';
+            _modelReadout = '✓ $detectedName • MATCH';
             _recognitionStage = 'Sign matched';
             _statusMessage =
                 'Detected ${_displaySignLabel(label)}. Continue signing…';
@@ -409,7 +414,9 @@ class _TranslateScreenState extends State<TranslateScreen>
           setState(() {
             _signalSummary =
                 '$frames frames • body $bodyFrames/$frames • hands $handFrames/$frames • face $faceFrames/$frames';
-            _modelReadout = '$detectedName • UNCERTAIN — repeat the sign';
+            _modelReadout = unsure
+                ? '? Maybe $detectedName — repeat the sign'
+                : '✗ No clear sign — repeat it';
             _recognitionStage = 'Signals found; no safe match';
             _statusMessage = 'Listening for the next clear sign…';
           });
@@ -918,6 +925,14 @@ class _TranslateScreenState extends State<TranslateScreen>
                                   '${(_confidence * 100).toStringAsFixed(0)}%',
                                   style: const TextStyle(
                                       color: Colors.white70, fontSize: 12),
+                                )
+                              else if (_personalMatch)
+                                const Text(
+                                  '✓ MATCH',
+                                  style: TextStyle(
+                                      color: Colors.greenAccent,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold),
                                 ),
                             ],
                           ),
