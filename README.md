@@ -10,6 +10,26 @@ A real-time **Indian Sign Language (ISL) recognition and translation system** bu
 ![Backend](https://img.shields.io/badge/Backend-FastAPI-009688)
 ![Frontend](https://img.shields.io/badge/Frontend-Flutter-02569B)
 
+**Live:** https://signbridgeco.xyz &nbsp;·&nbsp; **Maintainer:** [Lukesh2006](https://github.com/Lukesh2006)
+
+---
+
+## My contributions
+
+This repository is maintained by **Lukesh2006 (LUKESH M)**. It builds on the original
+signBridge codebase (recognition model, FastAPI backend and Flutter app; see
+[`LICENSE`](LICENSE) and the commit history). My design and work on top of it:
+
+| Area | What I built |
+|---|---|
+| **Personal sign learning** | Users teach the app their own signs. MediaPipe pose, hand and face features are matched to the user's own example clips with Dynamic Time Warping (`backend/app/models/personal_sign_model.py`, *Teach it your signs* screen). |
+| **Reliability gate** | Rejects clips with poor tracking or no movement, asks before saving inconsistent clips, and answers *match / "Was this X?" / not recognized*; examples can be undone or deleted. |
+| **Speed** | Saving a clip went from ~4–8 s to ~1.3 s and recognizing one from ~3 s to ~0.7 s (reused detectors, single-pass decoding, vectorized DTW). |
+| **Measurement** | A tool that measures the match cut-offs across several signers and suggests new ones (`backend/tools/tune_personal_thresholds.py`, [`docs/personal-sign-testing.md`](docs/personal-sign-testing.md)). |
+| **Free self-hosting** | Backend on an Ubuntu laptop behind a Cloudflare Tunnel, with an installer and systemd service (`backend/deployment/ubuntu/`, [`docs/self-hosting-ubuntu.md`](docs/self-hosting-ubuntu.md)). |
+| **Website** | Flutter web app deployed on Vercel at **signbridgeco.xyz** with HTTPS. |
+| **Reliability fixes** | Automatic sign-out when a saved login is rejected, a working deep health check, configurable Firebase and data paths. |
+
 ---
 
 ## Overview
