@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import '../../../core/services/camera_frame_converter.dart';
+import '../../../core/services/session_guard.dart';
 
 import '../../auth/providers/auth_provider.dart';
 import '../providers/translation_provider.dart';
@@ -370,6 +371,7 @@ class _TranslateScreenState extends State<TranslateScreen>
               body: await clip.readAsBytes(),
             )
             .timeout(const Duration(seconds: 25));
+        SessionGuard.check(response, token: token);
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (response.statusCode != 200) {
           throw Exception(

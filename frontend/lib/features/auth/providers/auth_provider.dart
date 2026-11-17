@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/services/api_service.dart';
+import '../../../core/services/session_guard.dart';
 
 class AuthProvider extends ChangeNotifier {
   String? _userId;
@@ -8,6 +11,7 @@ class AuthProvider extends ChangeNotifier {
   String? _email;
   bool _isLoading = false;
   String? _error;
+  bool _sessionExpired = false;
 
   String? get userId => _userId;
   String? get token => _token;
@@ -16,10 +20,37 @@ class AuthProvider extends ChangeNotifier {
   String? get error => _error;
   bool get isLoggedIn => _userId != null && _userId!.isNotEmpty;
 
+  /// True after the server rejected the saved login and the user was signed
+  /// out because of it. The app shows the sign-in screen, then calls
+  /// [acknowledgeSessionExpired].
+  bool get sessionExpired => _sessionExpired;
+
   late final Future<void> initialization;
+  late final StreamSubscription<String> _rejectedTokens;
 
   AuthProvider() {
     initialization = _loadSession();
+    _rejectedTokens = SessionGuard.rejectedTokens.listen(_onTokenRejected);
+  }
+
+  Future<void> _onTokenRejected(String rejected) async {
+    // Ignore 401s for an older token (e.g. a slow request that finished
+    // after the user signed in again).
+    if (!isLoggedIn || rejected != _token) return;
+    _sessionExpired = true;
+    await logout();
+  }
+
+  void acknowledgeSessionExpired() {
+    if (!_sessionExpired) return;
+    _sessionExpired = false;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _rejectedTokens.cancel();
+    super.dispose();
   }
 
   Future<void> _loadSession() async {
@@ -50,6 +81,7 @@ class AuthProvider extends ChangeNotifier {
       final userId = authData['id'] ?? '';
       final token = authData['token'] ?? '';
       if (userId.isNotEmpty) {
+        _sessionExpired = false;
         _userId = userId;
         _token = token;
         _email = email;
@@ -82,6 +114,7 @@ class AuthProvider extends ChangeNotifier {
       final userId = authData['id'] ?? '';
       final token = authData['token'] ?? '';
       if (userId.isNotEmpty) {
+        _sessionExpired = false;
         _userId = userId;
         _token = token;
         _email = email;
