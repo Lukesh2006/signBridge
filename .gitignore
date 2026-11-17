@@ -78,3 +78,11 @@ model/vocab.json
 
 # Local Firebase emulator test accounts and data (BUG 2 only)
 .emulator-data/
+
+# Local-only files on the BUG 2 drive (build tools, caches, machine-specific scripts, private files)
+tools/
+.cache/
+.codex-build/
+.claude/
+deliverables/
+sync-to-github.cmd
