@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
+import 'session_guard.dart';
+
 class ApiService {
   static String get baseUrl => dotenv.env['API_BASE_URL']!;
 
@@ -145,6 +147,7 @@ class ApiService {
           }),
         )
         .timeout(const Duration(seconds: 10));
+    SessionGuard.check(response, token: token);
 
     if (response.statusCode < 200 ||
         response.statusCode >= 300) {
@@ -171,6 +174,7 @@ class ApiService {
           },
         )
         .timeout(const Duration(seconds: 10));
+    SessionGuard.check(response, token: token);
 
     final data = jsonDecode(response.body);
 
@@ -217,6 +221,7 @@ class ApiService {
           }),
         )
         .timeout(const Duration(seconds: 10));
+    SessionGuard.check(response, token: token);
 
     if (response.statusCode < 200 ||
         response.statusCode >= 300) {
@@ -262,6 +267,7 @@ class ApiService {
           },
         )
         .timeout(const Duration(seconds: 10));
+    SessionGuard.check(response, token: token);
 
     if (response.statusCode < 200 ||
         response.statusCode >= 300) {
@@ -286,7 +292,7 @@ class ApiService {
           },
         )
         .timeout(const Duration(seconds: 10));
-
+    SessionGuard.check(response, token: token);
 
     if (response.statusCode < 200 ||
         response.statusCode >= 300) {

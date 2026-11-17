@@ -75,3 +75,6 @@ model/*.pt
 model/tokenizer.json
 model/config.json
 model/vocab.json
+
+# Local Firebase emulator test accounts and data (BUG 2 only)
+.emulator-data/

@@ -8,6 +8,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 
+import '../../../core/services/session_guard.dart';
 import '../../auth/providers/auth_provider.dart';
 
 class PersonalSignsScreen extends StatefulWidget {
@@ -149,12 +150,18 @@ class _PersonalSignsScreenState extends State<PersonalSignsScreen> {
     return {'Authorization': 'Bearer $token'};
   }
 
+  /// Signs the user out if the server rejected the login this request sent.
+  http.Response _checked(http.Response response) {
+    SessionGuard.check(response);
+    return response;
+  }
+
   Future<void> _loadSamples() async {
     try {
-      final response = await http.get(
+      final response = _checked(await http.get(
         Uri.parse('$_baseUrl/me/signs/samples'),
         headers: _headers(),
-      );
+      ));
       if (response.statusCode == 200 && mounted) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         setState(() {
@@ -287,12 +294,12 @@ class _PersonalSignsScreenState extends State<PersonalSignsScreen> {
           if (confirm) 'confirm': 'true',
         },
       );
-      final response = await http.post(uri,
+      final response = _checked(await http.post(uri,
           headers: {
             ..._headers(),
             'Content-Type': 'application/octet-stream',
           },
-          body: bytes);
+          body: bytes));
       data = jsonDecode(response.body) as Map<String, dynamic>;
       if (response.statusCode != 200)
         throw Exception(data['error'] ?? data['detail'] ?? 'Upload failed');
@@ -353,10 +360,10 @@ class _PersonalSignsScreenState extends State<PersonalSignsScreen> {
       _status = 'Removing example…';
     });
     try {
-      final response = await http.delete(
+      final response = _checked(await http.delete(
           Uri.parse(
               '$_baseUrl/me/signs/samples/${Uri.encodeComponent(label)}/$sampleId'),
-          headers: _headers());
+          headers: _headers()));
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       if (response.statusCode != 200)
         throw Exception(data['error'] ?? data['detail'] ?? 'Delete failed');
@@ -383,8 +390,9 @@ class _PersonalSignsScreenState extends State<PersonalSignsScreen> {
       _result = '';
     });
     try {
-      final response = await http.post(Uri.parse('$_baseUrl/me/signs/train'),
-          headers: _headers());
+      final response = _checked(await http.post(
+          Uri.parse('$_baseUrl/me/signs/train'),
+          headers: _headers()));
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       if (response.statusCode != 200)
         throw Exception(data['error'] ?? data['detail'] ?? 'Training failed');
@@ -415,12 +423,13 @@ class _PersonalSignsScreenState extends State<PersonalSignsScreen> {
         _busy = true;
         _status = 'Checking this clip against your personal signs…';
       });
-      final response = await http.post(Uri.parse('$_baseUrl/me/signs/predict'),
+      final response = _checked(await http.post(
+          Uri.parse('$_baseUrl/me/signs/predict'),
           headers: {
             ..._headers(),
             'Content-Type': 'application/octet-stream',
           },
-          body: bytes);
+          body: bytes));
       data = jsonDecode(response.body) as Map<String, dynamic>;
       if (response.statusCode != 200)
         throw Exception(
