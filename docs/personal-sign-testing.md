@@ -5,6 +5,20 @@ The cut-offs that decide **match / "Was this X?" / not recognized** live in
 `CONFIRM_DISTANCE`). They were first set from 16 clips of one signer. Before
 changing them, record several different people and measure.
 
+```mermaid
+flowchart LR
+    V["👥 5+ volunteers<br/>one account each"] --> R["🎬 Personal Signs<br/>4+ signs × 5 clips"]
+    R --> T["📊 tune_personal_thresholds.py"]
+    T --> Q{"Untaught sign called<br/>a match ≈ 0%?"}
+    Q -- "No" --> C["🔧 Try the suggested<br/>cut-offs, re-test"] --> T
+    Q -- "Yes" --> K["✅ Keep the cut-offs"]
+
+    classDef ok fill:#e6f6ec,stroke:#1d7a46,color:#0f3d23
+    classDef ask fill:#fff4e0,stroke:#a86400,color:#4d2e00
+    class K ok
+    class C ask
+```
+
 ## 1. Record
 
 For each volunteer (aim for **at least 5 people**, different hand sizes, skin

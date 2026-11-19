@@ -5,11 +5,30 @@ and makes it reachable at **https://api.signbridgeco.xyz**, so the website at
 **https://signbridgeco.xyz** (already on Vercel) can log people in, keep history
 and recognise personal signs.
 
-```text
-Browser / phone ──HTTPS/WSS──▶ Cloudflare (free) ──Tunnel──▶ Ubuntu laptop
-                                                              └─ SignBridge backend (127.0.0.1:5000)
-                                                                   ├─ Firebase (free Spark plan): login + history
-                                                                   └─ /var/lib/signbridge: recordings + models
+```mermaid
+flowchart LR
+    U["📱💻 Browser / phone<br/>signbridgeco.xyz"] -- "HTTPS / WSS" --> CF["☁️ Cloudflare<br/>free plan"]
+    CF -- "Tunnel<br/>no open ports" --> UB["🐧 Ubuntu laptop<br/>SignBridge backend<br/>127.0.0.1:5000"]
+    UB --> FB["🔥 Firebase · Spark (free)<br/>login + history"]
+    UB --> D[("📁 /var/lib/signbridge<br/>recordings + models")]
+```
+
+### The whole setup at a glance
+
+```mermaid
+flowchart TD
+    A["1️⃣ Prepare the laptop<br/>updates · never sleep"] --> B["2️⃣ Firebase project<br/>Email/Password · Realtime DB · key"]
+    B --> C["3️⃣ install.sh<br/>code · packages · service"]
+    C --> H{"curl 127.0.0.1:5000/health<br/>says ok?"}
+    H -- "No" --> L["Check logs<br/>journalctl -u signbridge-backend"] --> C
+    H -- "Yes" --> D["4️⃣ Domain on Cloudflare<br/>change nameservers at GoDaddy"]
+    D --> E["5️⃣ Cloudflare Tunnel<br/>api.signbridgeco.xyz"]
+    E --> F["✅ Sign up on signbridgeco.xyz"]
+
+    classDef ok fill:#e6f6ec,stroke:#1d7a46,color:#0f3d23
+    classDef step fill:#eef1ff,stroke:#3a4bd8,color:#1d2040
+    class A,B,C,D,E step
+    class F ok
 ```
 
 | Piece | Cost | Why |

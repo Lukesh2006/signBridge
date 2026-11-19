@@ -29,6 +29,72 @@ signBridge codebase (recognition model, FastAPI backend and Flutter app; see
 | **Free self-hosting** | Backend on an Ubuntu laptop behind a Cloudflare Tunnel, with an installer and systemd service (`backend/deployment/ubuntu/`, [`docs/self-hosting-ubuntu.md`](docs/self-hosting-ubuntu.md)). |
 | **Website** | Flutter web app deployed on Vercel at **signbridgeco.xyz** with HTTPS. |
 | **Reliability fixes** | Automatic sign-out when a saved login is rejected, a working deep health check, configurable Firebase and data paths. |
+| **Personal ISL Signs page** | **https://signbridgeco.xyz/signs**, a standalone teach-and-recognize page built on my engine ([isl-personal-signs](https://github.com/Lukesh2006/isl-personal-signs)). |
+
+### Personal sign learning, step by step
+
+```mermaid
+flowchart TD
+    subgraph APP["📱 SignBridge app · Teach it your signs"]
+        REC["🎬 Record a sign example"]
+        TRN["🔁 Train"]
+        RCG["🤟 Recognize my sign"]
+    end
+    REC -- "clip" --> GATE{"🛡️ Reliability gate<br/>hands · body · movement ·<br/>consistency · confusion"}
+    GATE -- "reliable" --> SAVE[("💾 Your examples<br/>per user")]
+    GATE -- "doubtful" --> OKQ["⚠️ You confirm first"] --> SAVE
+    GATE -- "bad tracking" --> REJ["❌ Rejected, with the reason"]
+    TRN --> SAVE
+    SAVE --> PROTO["🏆 DTW prototypes<br/>+ leave-one-out check"]
+    RCG -- "clip" --> MATCH["📏 DTW to your prototypes"]
+    PROTO --> MATCH
+    MATCH --> ANS{"Answer"}
+    ANS --> A1["✅ Match"]
+    ANS --> A2["❓ Was this X?"]
+    ANS --> A3["❌ Not recognized"]
+
+    classDef ok fill:#e6f6ec,stroke:#1d7a46,color:#0f3d23
+    classDef ask fill:#fff4e0,stroke:#a86400,color:#4d2e00
+    classDef bad fill:#fdeaea,stroke:#b3261e,color:#5c130f
+    class A1 ok
+    class A2,OKQ ask
+    class A3,REJ bad
+```
+
+### How it is hosted (free)
+
+```mermaid
+flowchart LR
+    U["📱💻 Users"] --> V["🌐 signbridgeco.xyz<br/>Flutter web app · Vercel"]
+    U --> S["🌐 signbridgeco.xyz/signs<br/>Personal ISL Signs page"]
+    V -- "API · HTTPS / WSS" --> API["api.signbridgeco.xyz"]
+    API -- "☁️ Cloudflare Tunnel<br/>no open ports" --> UB["🐧 Ubuntu laptop<br/>FastAPI backend"]
+    UB --> FB["🔥 Firebase · free<br/>login + history"]
+    UB --> DATA[("📁 Recordings<br/>+ personal models")]
+    S -- "engine on the same device<br/>or a hosted address" --> ENG["🧠 isl-personal-signs engine"]
+```
+
+### From my drive to GitHub and the website
+
+```mermaid
+flowchart LR
+    USB["💾 BUG 2 USB drive<br/>project · tools · recordings"] -- "sync-to-github.cmd<br/>(blocks secrets)" --> GH["🐙 GitHub<br/>Lukesh2006/signBridge"]
+    USB -- "flutter build web<br/>+ vercel deploy" --> WEB["🌐 signbridgeco.xyz"]
+    GH -- "install.sh<br/>git pull + restart" --> SRV["🐧 Ubuntu server"]
+    GH -- "GitHub Actions" --> CI["✅ Tests"]
+```
+
+### Automatic sign-out when a login expires
+
+```mermaid
+flowchart TD
+    REQ["App request with saved login"] --> R{"Server reply"}
+    R -- "OK" --> FINE["Continue"]
+    R -- "401 Invalid token" --> G["🛡️ SessionGuard reports<br/>the token that was rejected"]
+    G --> CUR{"Is it the<br/>current login?"}
+    CUR -- "No (old request)" --> IGN["Ignore"]
+    CUR -- "Yes" --> OUT["Sign out"] --> LOGIN["🔑 Sign-in screen<br/>'Your session has expired'"]
+```
 
 ---
 
